@@ -5,7 +5,7 @@ import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from surprise import Dataset, Reader, SVD, accuracy
-from surprise.model_selection import train_test_split
+from sklearn.model_selection import train_test_split
 
 
 def load_data(ratings_path="data/ratings.csv", items_path="data/items.csv"):
@@ -21,14 +21,18 @@ def build_content_similarity(items):
     return cosine_sim
 
 
-def train_collaborative_model(ratings):
+def train_collaborative_model(train_ratings, test_ratings=None):
     reader = Reader(rating_scale=(1, 5))
-    dataset = Dataset.load_from_df(ratings[["user_id", "item_id", "rating"]], reader)
-    trainset, testset = train_test_split(dataset, test_size=0.2, random_state=42)
+    dataset = Dataset.load_from_df(train_ratings[["user_id", "item_id", "rating"]], reader)
+    trainset = dataset.build_full_trainset()
     model = SVD(random_state=42)
     model.fit(trainset)
-    predictions = model.predict_test = model.test(testset)
-    rmse = accuracy.rmse(predictions, verbose=False)
+
+    rmse = None
+    if test_ratings is not None:
+        testset = list(zip(test_ratings["user_id"], test_ratings["item_id"], test_ratings["rating"]))
+        predictions = model.test(testset)
+        rmse = accuracy.rmse(predictions, verbose=False)
     return model, rmse
 
 
@@ -94,15 +98,17 @@ def recommend_items(user_id, model, ratings, items, cosine_sim, top_n=5, collab_
     return scores[:top_n], False
 
 
-def precision_at_k(model, ratings, items, cosine_sim, k=5, rating_threshold=4, collab_weight=0.7, content_weight=0.3):
+def precision_at_k(model, train_ratings, test_ratings, items, cosine_sim, k=5, rating_threshold=4,
+                   collab_weight=0.7, content_weight=0.3):
+    """Recommend using only TRAIN ratings; a hit = recommended item the user rated >= threshold in TEST."""
     precisions = []
-    for user_id in ratings["user_id"].unique():
-        user_ratings = ratings[ratings["user_id"] == user_id]
-        relevant_items = set(user_ratings[user_ratings["rating"] >= rating_threshold]["item_id"])
+    for user_id in test_ratings["user_id"].unique():
+        user_test = test_ratings[test_ratings["user_id"] == user_id]
+        relevant_items = set(user_test[user_test["rating"] >= rating_threshold]["item_id"])
         if not relevant_items:
             continue
-        recs, _ = recommend_items(user_id, model, ratings, items, cosine_sim, top_n=k,
-                                   collab_weight=collab_weight, content_weight=content_weight)
+        recs, _ = recommend_items(user_id, model, train_ratings, items, cosine_sim, top_n=k,
+                                  collab_weight=collab_weight, content_weight=content_weight)
         recommended_items = set(r[0] for r in recs)
         hits = len(recommended_items & relevant_items)
         precisions.append(hits / k)
@@ -126,14 +132,18 @@ def print_recommendations(user_id, recs, cold_start):
 
 def main():
     ratings, items = load_data()
-
     cosine_sim = build_content_similarity(items)
-    model, rmse = train_collaborative_model(ratings)
+
+    # Evaluation: hold out 20% of ratings
+    train_r, test_r = train_test_split(ratings, test_size=0.2, random_state=42)
+    eval_model, rmse = train_collaborative_model(train_r, test_r)
     print(f"Collaborative Filtering RMSE: {rmse:.4f}")
 
-    p_at_5 = precision_at_k(model, ratings, items, cosine_sim, k=5)
+    p_at_5 = precision_at_k(eval_model, train_r, test_r, items, cosine_sim, k=5)
     print(f"Precision@5 (hybrid): {p_at_5:.4f}")
 
+    # Final model: train on all ratings for real recommendations
+    model, _ = train_collaborative_model(ratings)
     save_model(model, cosine_sim, items)
     print("Model saved to hybrid_model.pkl")
 
